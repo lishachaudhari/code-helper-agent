@@ -1,0 +1,632 @@
+Step 1 (final, Groq version)
+
+Here's the complete Step 1 with Groq wired in. If you've already created the folders/files from before, skip to step 9.
+
+1. Navigate and create the project folder
+
+powershell
+cd Desktop
+mkdir code-helper-agent
+cd code-helper-agent
+
+2. Create the subfolders
+
+powershell
+New-Item -ItemType Directory -Path agent, prompts, sandbox, tests
+
+3. Create the files inside agent\
+
+powershell
+New-Item -ItemType File -Path "agent\__init__.py","agent\state.py","agent\planner.py","agent\coder.py","agent\executor.py","agent\critic.py","agent\graph.py"
+
+4. Create the root-level files
+
+powershell
+New-Item -ItemType File -Path "main.py","README.md","requirements.txt",".env"
+
+5. Confirm everything was created
+
+powershell
+dir
+dir agent
+
+6. Create the virtual environment
+
+powershell
+python -m venv venv
+
+7. Allow scripts to run (only if you hit an execution policy error)
+
+powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+Type Y if asked.
+
+8. Activate the virtual environment
+
+powershell
+venv\Scripts\activate
+
+You'll see (venv) appear at the start of your prompt.
+
+9. Fill in requirements.txt (open it in VS Code/editor and paste)
+
+langgraph
+langchain-groq
+python-dotenv
+
+10. Install dependencies
+
+powershell
+pip install -r requirements.txt
+
+11. Add your Groq API key to .env
+
+GROQ_API_KEY=your_key_here
+
+(Get this from console.groq.com → API Keys, as covered earlier.)
+
+12. Fill in agent\state.py
+
+python
+from typing import TypedDict, List, Optional
+
+class AgentState(TypedDict):
+    task: str                      # the original user task
+    plan: List[str]                # list of steps from the planner
+    current_step_index: int        # which step we're on
+    code: str                      # current code attempt
+    test_results: Optional[dict]   # {"success": bool, "output": str, "error": str}
+    iteration_count: int           # retries for current step
+    max_iterations: int            # retry cap (e.g. 5)
+    history: List[dict]            # log of every attempt for the final report
+    final_output: Optional[str]    # compiled final answer
+
+Once pip install -r requirements.txt finishes without errors and state.py is saved, confirm and I'll give you Step 2: building the Planner node (this is where we'll write the first actual Groq API call).
+
+Step 2: Building the Planner node
+
+This is the first node in your graph — it takes the user's task and breaks it into a short sequence of steps using Groq.
+
+1. Open agent/planner.py and paste this in:
+
+python
+import os
+import json
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+
+load_dotenv()
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0.3,
+)
+
+PLANNER_PROMPT = """You are a planning module for a coding agent.
+Given a coding task, break it down into 3 to 5 clear, ordered steps needed to solve it.
+
+Respond ONLY with valid JSON in this exact format, no extra text, no markdown:
+{{"steps": ["step 1 description", "step 2 description", "step 3 description"]}}
+
+Task: {task}
+"""
+
+def plan_task(state: dict) -> dict:
+    """Takes the AgentState, calls the LLM to generate a plan, updates state."""
+    prompt = PLANNER_PROMPT.format(task=state["task"])
+    response = llm.invoke(prompt)
+
+    raw_text = response.content.strip()
+    # strip accidental markdown fences if the model adds them
+    raw_text = raw_text.replace("```json", "").replace("```", "").strip()
+
+    try:
+        parsed = json.loads(raw_text)
+        steps = parsed.get("steps", [])
+    except json.JSONDecodeError:
+        # fallback: treat the whole response as a single step if parsing fails
+        steps = [raw_text]
+
+    state["plan"] = steps
+    state["current_step_index"] = 0
+    state["iteration_count"] = 0
+    state["history"] = state.get("history", [])
+    state["history"].append({
+        "stage": "planner",
+        "output": steps
+    })
+
+    return state
+
+What this does:
+
+Loads your Groq key from .env
+Sends the task to llama-3.3-70b-versatile (a strong free-tier Groq model — good for reasoning/planning)
+Forces JSON-only output so you can reliably parse it into a Python list
+Has a fallback if the model doesn't return clean JSON (LLMs sometimes wrap it in extra text — this makes your agent more robust, which is worth mentioning in your README)
+Updates the shared state dict: fills in plan, resets current_step_index and iteration_count, and logs this step into history (this log is what becomes your "iteration trace" for the demo video)
+
+2. Quick standalone test — create a temporary test file to check this works before wiring it into the full graph. Create tests/test_planner.py:
+
+python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from agent.planner import plan_task
+
+state = {
+    "task": "Write a Python function that checks if a number is prime",
+}
+
+result = plan_task(state)
+print("Generated plan:")
+for i, step in enumerate(result["plan"], 1):
+    print(f"{i}. {step}")
+
+3. Run it:
+
+powershell
+python tests\test_planner.py
+
+Step 3: Building the Coder node
+
+This node takes the current plan step (plus any error from a previous failed attempt) and generates working Python code for it.
+
+1. Open agent/coder.py and paste this in:
+
+python
+import os
+import re
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+
+load_dotenv()
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0.2,
+)
+
+CODER_PROMPT = """You are a coding module for an autonomous agent.
+
+Overall task: {task}
+
+Plan so far:
+{plan}
+
+Write complete, runnable Python code that accomplishes the overall task.
+Include the function definition AND a few example calls with print statements so the code can be executed and verified.
+
+{error_context}
+
+Respond ONLY with a single Python code block, no explanation before or after.
+"""
+
+def extract_code(text: str) -> str:
+    """Pulls code out of a markdown code block, or returns raw text if none found."""
+    match = re.search(r"```(?:python)?\s*(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+def write_code(state: dict) -> dict:
+    """Generates code based on the plan and any previous error, updates state."""
+    plan_text = "\n".join(f"{i+1}. {step}" for i, step in enumerate(state["plan"]))
+
+    error_context = ""
+    if state.get("test_results") and not state["test_results"].get("success", True):
+        error_context = f"""
+Your previous attempt failed with this error:
+{state['test_results'].get('error', 'Unknown error')}
+
+Here was the previous code:
+{state.get('code', '')}
+
+Fix the issue and provide corrected code.
+"""
+
+    prompt = CODER_PROMPT.format(
+        task=state["task"],
+        plan=plan_text,
+        error_context=error_context
+    )
+
+    response = llm.invoke(prompt)
+    code = extract_code(response.content)
+
+    state["code"] = code
+    state["history"] = state.get("history", [])
+    state["history"].append({
+        "stage": "coder",
+        "iteration": state.get("iteration_count", 0),
+        "output": code
+    })
+
+    return state
+
+What this does:
+
+Builds a prompt combining the task + the full plan (gives the model context, not just one isolated step)
+If there's a previous failed attempt in state["test_results"], it feeds the error back in — this is the retry/self-correction mechanism that makes it "agentic," not one-shot
+extract_code() strips the markdown fences (```python ... ```) since LLMs almost always wrap code in them even when told not to — this is a common gotcha, good to handle defensively
+Logs every attempt into history with its iteration number — this becomes your demo's "watch it retry" trace
+
+2. Test it — create tests/test_coder.py:
+
+python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from agent.planner import plan_task
+from agent.coder import write_code
+
+state = {
+    "task": "Write a Python function that checks if a number is prime",
+}
+
+state = plan_task(state)
+state["test_results"] = None
+state["iteration_count"] = 0
+
+state = write_code(state)
+
+print("Generated code:\n")
+print(state["code"])
+
+3. Run it:
+
+powershell
+python tests\test_coder.py
+
+You should see clean, runnable Python code printed out (no markdown fences, no extra commentary).
+
+Step 4: Building the Executor node
+
+This node actually runs the generated code in a sandboxed subprocess and captures whether it succeeded or failed. This is your agent's "tool use" — treat it explicitly as that in your README.
+
+1. Open agent/executor.py and paste this in:
+
+python
+import subprocess
+import sys
+import tempfile
+import os
+
+TIMEOUT_SECONDS = 10
+
+def run_code(state: dict) -> dict:
+    """Executes state['code'] in an isolated subprocess and records the result."""
+    code = state["code"]
+
+    # Write code to a temporary file so we can run it as a real subprocess
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False, dir="sandbox", encoding="utf-8"
+    ) as tmp_file:
+        tmp_file.write(code)
+        tmp_path = tmp_file.name
+
+    try:
+        result = subprocess.run(
+            [sys.executable, tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+        )
+
+        success = result.returncode == 0
+        test_results = {
+            "success": success,
+            "output": result.stdout.strip(),
+            "error": result.stderr.strip() if not success else "",
+        }
+
+    except subprocess.TimeoutExpired:
+        test_results = {
+            "success": False,
+            "output": "",
+            "error": f"Execution timed out after {TIMEOUT_SECONDS} seconds (possible infinite loop).",
+        }
+
+    finally:
+        # clean up the temp file
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    state["test_results"] = test_results
+    state["iteration_count"] = state.get("iteration_count", 0) + 1
+    state["history"] = state.get("history", [])
+    state["history"].append({
+        "stage": "executor",
+        "iteration": state["iteration_count"],
+        "success": test_results["success"],
+        "output": test_results["output"],
+        "error": test_results["error"],
+    })
+
+    return state
+
+What this does:
+
+Writes the generated code to a real temporary .py file inside your sandbox/ folder (keeps it isolated from your main project files)
+Runs it as an actual subprocess (not exec() — subprocess is safer since a crash/infinite loop can't take down your whole agent process)
+Has a 10-second timeout, so an infinite loop in generated code doesn't hang your agent forever — worth mentioning as a safety feature in your README
+Captures stdout (the program's actual output) and stderr (the traceback if it crashed)
+Increments iteration_count — this is what your retry-loop condition (Step 6, in the graph) will check against max_iterations
+Deletes the temp file afterward so sandbox/ doesn't fill up with junk
+
+2. Test it — create tests/test_executor.py:
+
+python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from agent.planner import plan_task
+from agent.coder import write_code
+from agent.executor import run_code
+
+state = {
+    "task": "Write a Python function that checks if a number is prime",
+}
+
+state = plan_task(state)
+state["test_results"] = None
+state["iteration_count"] = 0
+
+state = write_code(state)
+state = run_code(state)
+
+print("Success:", state["test_results"]["success"])
+print("\n--- Output ---")
+print(state["test_results"]["output"])
+print("\n--- Error ---")
+print(state["test_results"]["error"])
+
+3. Run it:
+
+powershell
+python tests\test_executor.py
+
+You should see Success: True and the printed prime-check output from the code.
+
+Step 5: Building the Critic node
+
+This node reviews a successful run for quality — edge cases, readability, missed requirements. This is your differentiator step (most contest submissions stop at "tests passed"), so it's worth building well.
+
+1. Open agent/critic.py and paste this in:
+
+python
+import os
+import json
+from dotenv import load_dotenv
+from langchain_groq import ChatGroq
+
+load_dotenv()
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
+    api_key=os.getenv("GROQ_API_KEY"),
+    temperature=0.3,
+)
+
+CRITIC_PROMPT = """You are a code reviewer for an autonomous coding agent.
+
+Task: {task}
+
+The following code ran successfully with this output:
+{output}
+
+Code:
+{code}
+
+Review the code for:
+1. Edge cases that might be missed
+2. Readability or style issues
+3. Whether it fully satisfies the original task
+
+Respond ONLY with valid JSON in this exact format, no extra text, no markdown:
+{{"quality": "good" or "needs_improvement", "notes": "1-2 sentence summary of your review"}}
+"""
+
+def review_code(state: dict) -> dict:
+    """Reviews successful code for quality, updates state with reflection notes."""
+    prompt = CRITIC_PROMPT.format(
+        task=state["task"],
+        output=state["test_results"]["output"],
+        code=state["code"],
+    )
+
+    response = llm.invoke(prompt)
+    raw_text = response.content.strip().replace("```json", "").replace("```", "").strip()
+
+    try:
+        review = json.loads(raw_text)
+    except json.JSONDecodeError:
+        review = {"quality": "good", "notes": raw_text}
+
+    state["review"] = review
+    state["history"] = state.get("history", [])
+    state["history"].append({
+        "stage": "critic",
+        "output": review
+    })
+
+    return state
+
+What this does:
+
+Only runs after the Executor reports success — its job isn't to catch bugs, it's to assess quality
+Returns a simple structured verdict (good / needs_improvement) plus a short note — this becomes a nice line in your final report ("Agent self-reviewed: handles edge cases correctly, code is readable")
+Same defensive JSON-parsing pattern as the Planner, since LLMs occasionally break format
+
+2. Test it — create tests/test_critic.py:
+
+python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from agent.planner import plan_task
+from agent.coder import write_code
+from agent.executor import run_code
+from agent.critic import review_code
+
+state = {
+    "task": "Write a Python function that checks if a number is prime",
+}
+
+state = plan_task(state)
+state["test_results"] = None
+state["iteration_count"] = 0
+
+state = write_code(state)
+state = run_code(state)
+
+if state["test_results"]["success"]:
+    state = review_code(state)
+    print("Review:", state["review"])
+else:
+    print("Code failed, skipping review.")
+    print(state["test_results"]["error"])
+
+3. Run it:
+
+powershell
+python tests\test_critic.py
+
+You should see something like:
+
+Review: {'quality': 'good', 'notes': 'The code correctly handles edge cases (n<2) and is efficient using sqrt bound; readable and well-documented.'}
+
+Step 6: Building the LangGraph StateGraph
+
+This is the step that makes it officially "agentic" — a real graph with conditional routing, not just sequential function calls.
+
+1. Open agent/graph.py and paste this in:
+
+python
+from langgraph.graph import StateGraph, END
+from agent.state import AgentState
+from agent.planner import plan_task
+from agent.coder import write_code
+from agent.executor import run_code
+from agent.critic import review_code
+
+
+def format_final_output(state: dict) -> dict:
+    """Compiles the final answer once the loop ends (success or max retries)."""
+    success = state["test_results"]["success"]
+
+    if success:
+        review = state.get("review", {})
+        summary = (
+            f"Task solved in {state['iteration_count']} iteration(s).\n\n"
+            f"Final code:\n{state['code']}\n\n"
+            f"Test output:\n{state['test_results']['output']}\n\n"
+            f"Self-review: {review.get('notes', 'N/A')}"
+        )
+    else:
+        summary = (
+            f"Failed to solve the task after {state['iteration_count']} iteration(s).\n\n"
+            f"Last code attempt:\n{state['code']}\n\n"
+            f"Last error:\n{state['test_results']['error']}"
+        )
+
+    state["final_output"] = summary
+    return state
+
+
+def should_retry(state: dict) -> str:
+    """Conditional edge: decides whether to retry, give up, or move to review."""
+    success = state["test_results"]["success"]
+    max_reached = state["iteration_count"] >= state["max_iterations"]
+
+    if success:
+        return "review"
+    elif max_reached:
+        return "give_up"
+    else:
+        return "retry"
+
+
+def build_graph():
+    graph = StateGraph(AgentState)
+
+    graph.add_node("planner", plan_task)
+    graph.add_node("coder", write_code)
+    graph.add_node("executor", run_code)
+    graph.add_node("critic", review_code)
+    graph.add_node("finalize", format_final_output)
+
+    graph.set_entry_point("planner")
+    graph.add_edge("planner", "coder")
+    graph.add_edge("coder", "executor")
+
+    graph.add_conditional_edges(
+        "executor",
+        should_retry,
+        {
+            "retry": "coder",       # fail, under limit -> loop back to coder
+            "give_up": "finalize",  # fail, limit hit -> stop and report failure
+            "review": "critic",     # pass -> reflect
+        },
+    )
+
+    graph.add_edge("critic", "finalize")
+    graph.add_edge("finalize", END)
+
+    return graph.compile()
+
+What this does:
+
+Defines every node exactly as your existing functions — no rewriting needed, LangGraph just orchestrates them
+should_retry is the conditional edge — this is the literal "plan → act → observe → respond" loop the contest wants, expressed as graph logic rather than a hand-rolled while loop
+Caps retries via max_iterations so a stubborn bug can't loop forever (paired with the Executor's per-run timeout, you now have two layers of safety — worth a line in your README)
+finalize always runs last, whether the task succeeded or the retry budget ran out — so you always get a coherent final report, never a silent crash
+
+2. Update main.py to actually run the whole thing:
+
+python
+from agent.graph import build_graph
+
+def main():
+    task = input("Enter a coding task: ")
+
+    initial_state = {
+        "task": task,
+        "plan": [],
+        "current_step_index": 0,
+        "code": "",
+        "test_results": None,
+        "iteration_count": 0,
+        "max_iterations": 5,
+        "history": [],
+        "final_output": None,
+    }
+
+    app = build_graph()
+    final_state = app.invoke(initial_state)
+
+    print("\n" + "=" * 50)
+    print("FINAL RESULT")
+    print("=" * 50)
+    print(final_state["final_output"])
+
+if __name__ == "__main__":
+    main()
+
+3. Run it:
+
+powershell
+python main.py
+
+When prompted, try something with a slightly higher chance of needing a retry, e.g.:
+
+Write a function that returns the nth Fibonacci number using memoization
+
+You should see it plan, write code, run it, and print a final coherent result.
