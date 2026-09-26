@@ -79,19 +79,22 @@ This follows a **Plan-and-Execute + ReAct hybrid** pattern, implemented as a Lan
 
 **Input:**
 ```
-Write a function that validates whether a given string is a valid IPv4 address, including handling leading zeros, out-of-range octets, and extra/missing dots
+Write a function that returns the nth Fibonacci number using memoization
 ```
 
 **Output (abbreviated):**
 ```
-[PLANNER] plan: ['Split by "." and verify 4 parts', 'Check digits and leading-zero rules', 'Range-check 0-255', 'Return result']
-[CODER] generated 39 lines of code
+[PLANNER] plan: ['Define the function signature that accepts an integer n and an optional cache for memoization', 'Initialize the cache with base cases: Fibonacci(0) = 0 and Fibonacci(1) = 1', 'Check if n is in the cache; if so, return the cached value to avoid recomputation', 'If n is not cached, recursively compute Fibonacci(n-1) and Fibonacci(n-2), store the sum in the cache, and return it']
+
+[CODER] generated 21 lines of code
+
 [EXECUTOR] result: PASSED (iteration 1)
-[CRITIC] verdict: good — correctly checks dot count, numeric content, leading-zero rules, and range.
+
+[CRITIC] verdict: needs_improvement — correctly computes Fibonacci numbers with memoization, but lacks handling for negative inputs (which would cause infinite recursion) and could use functools.lru_cache for simplicity.
 
 FINAL RESULT
 Task solved in 1 iteration(s).
-[full code + test output showing all 10 test cases correctly classified]
+[full function implementation, tested with F(0) through F(9), plus F(35) to demonstrate memoization efficiency on a larger input]
 ```
 
 ## Baseline Comparison (Agent vs. One-Shot LLM)
