@@ -5,13 +5,19 @@ import os
 
 TIMEOUT_SECONDS = 10
 
+# Build an absolute path to the sandbox folder, relative to this file's location,
+# and create it if it doesn't exist (works both locally and on Streamlit Cloud)
+SANDBOX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sandbox")
+SANDBOX_DIR = os.path.abspath(SANDBOX_DIR)
+os.makedirs(SANDBOX_DIR, exist_ok=True)
+
+
 def run_code(state: dict) -> dict:
     """Executes state['code'] in an isolated subprocess and records the result."""
     code = state["code"]
 
-    # Write code to a temporary file so we can run it as a real subprocess
     with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, dir="sandbox", encoding="utf-8"
+        mode="w", suffix=".py", delete=False, dir=SANDBOX_DIR, encoding="utf-8"
     ) as tmp_file:
         tmp_file.write(code)
         tmp_path = tmp_file.name
@@ -39,7 +45,6 @@ def run_code(state: dict) -> dict:
         }
 
     finally:
-        # clean up the temp file
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
