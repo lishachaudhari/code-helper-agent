@@ -2,6 +2,10 @@
 
 An autonomous coding agent built with LangGraph that plans, writes, executes, and self-corrects code through a structured Plan → Act → Observe → Reflect workflow — not a single LLM call.
 
+## Demo Video
+
+[![Watch the demo](https://github.com/user-attachments/assets/1ef256f8-962d-4476-8ea6-bdda87253cfa)](https://drive.google.com/file/d/1MloYR2YbvBjF0KABSU67eRnf8UWVPorM/view?usp=sharing)
+
 ## Problem Statement
 
 Given a coding task in plain English, the agent:
@@ -115,6 +119,9 @@ To validate the value of the agentic architecture, the same tasks were run throu
 Run this comparison yourself:
 ```bash
 python tests/run_comparison.py
+```
+## Project Structure
+
 ```
 code-helper-agent/
 ├── agent/
