@@ -4,7 +4,7 @@ An autonomous coding agent built with LangGraph that plans, writes, executes, an
 
 ## Demo Video
 
-[![Watch the demo](https://github.com/user-attachments/assets/a1cb3588-ef0b-4d47-b29b-af92fd6f7b2b)](https://drive.google.com/file/d/1MloYR2YbvBjF0KABSU67eRnf8UWVPorM/view?usp=sharing)
+[![Watch the demo](https://github.com/user-attachments/assets/af0b729c-7983-4701-8d25-ef124b5bbc6e)](https://drive.google.com/file/d/1MloYR2YbvBjF0KABSU67eRnf8UWVPorM/view?usp=sharing)
 
 ## Problem Statement
 
