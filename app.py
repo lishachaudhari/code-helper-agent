@@ -1,4 +1,10 @@
+import os
 import streamlit as st
+
+# Load Streamlit Cloud secrets into environment variables so os.getenv() can find them
+if "GROQ_API_KEY" in st.secrets:
+    os.environ["GROQ_API_KEY"] = st.secrets["GROQ_API_KEY"]
+
 from agent.graph import build_graph
 
 st.set_page_config(page_title="Code Helper Agent", page_icon="", layout="wide")
