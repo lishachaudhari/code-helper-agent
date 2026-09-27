@@ -116,6 +116,9 @@ Run this comparison yourself:
 ```bash
 python tests/run_comparison.py
 ```
+## Project Structure
+
+```
 code-helper-agent/
 ├── agent/
 │   ├── state.py        # shared AgentState schema
